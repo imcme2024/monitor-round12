@@ -271,10 +271,16 @@ function startAutoSync(){
     updateSyncStatus('offline');
   });
 
-  // フォアグラウンド復帰時に同期
+  // フォアグラウンド復帰時：日付チェック → 同期
   document.addEventListener('visibilitychange',function(){
-    if(!document.hidden&&gdriveToken&&navigator.onLine){
-      syncFromGoogleDrive(function(){});
+    if(!document.hidden){
+      checkDateChange().then(function(){
+        loadCurrentChannel();
+        render();
+        if(gdriveToken&&navigator.onLine){
+          syncFromGoogleDrive(function(){});
+        }
+      });
     }
   });
 }
