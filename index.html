@@ -77,7 +77,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
   border:2px solid transparent;
   box-shadow:0 2px 4px rgba(0,0,0,0.2);overflow:hidden;
 }
-/* 選択中：枠線ハイライトのみ（塗りつぶし色はそのまま） */
 .channel-card-active{
   border:3px solid #fff !important;
   box-shadow:0 0 0 2px rgba(255,255,255,0.5), 0 4px 12px rgba(0,0,0,0.3) !important;
@@ -130,7 +129,16 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .teal{background:#0d9488;}.teal-light{background:#ccfbf1;}.teal-text{color:#0d9488;}
 .orange{background:#ea580c;}.orange-light{background:#ffedd5;}.orange-text{color:#ea580c;}
 .pink{background:#db2777;}.pink-light{background:#fce7f3;}.pink-text{color:#db2777;}
-.token-banner{display:none;position:sticky;top:0;z-index:300;background:#dc2626;color:#fff;padding:10px 16px;font-size:13px;font-weight:700;text-align:center;border-radius:0 0 8px 8px;box-shadow:0 4px 8px rgba(220,38,68,0.4);}
+
+/* 同期ステータスバー */
+.sync-bar{display:flex;align-items:center;gap:8px;font-size:12px;margin-top:4px;}
+.sync-status{font-weight:600;}
+.sync-status.synced{color:#059669;}
+.sync-status.syncing{color:#f59e0b;}
+.sync-status.error{color:#dc2626;}
+.sync-status.offline{color:#6b7280;}
+
+.token-banner{display:none;position:sticky;top:0;z-index:300;background:#dc2626;color:#fff;padding:10px 16px;font-size:13px;font-weight:700;text-align:center;border-radius:0 0 8px 8px;box-shadow:0 4px 8px rgba(220,38,38,0.4);}
 .token-banner.show{display:block;}
 .token-banner span{color:#fde68a;text-decoration:underline;cursor:pointer;}
 </style>
@@ -140,6 +148,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
   ⚠️ Google Driveの接続が切れました。<span onclick="connectGoogleDrive()">ここをタップして再接続</span>
 </div>
 <div class="container" id="app"></div>
+
 <script>
 (function(){
   document.addEventListener('touchmove',function(e){if(e.touches.length>1)e.preventDefault();},{passive:false});
@@ -191,8 +200,199 @@ function emptyInput(){
     signalLost:false,tempAbsent:false,admitDischargeError:false,spo2Only:false,remarks:''};
 }
 
-let gdriveToken=null,gdriveFileId=null,syncInterval=null,lastSyncTime='';
+// ============================================================
+// Google Drive 連携 変数
+// ============================================================
+let gdriveToken=null,gdriveFileId=null,lastSyncTime='';
 const GDRIVE_FILE_NAME='monitor-round-data.json';
+
+// バックオフ設定（30秒→2分→10分）
+const SYNC_INTERVALS=[30*1000, 2*60*1000, 10*60*1000];
+let syncFailCount=0;
+let syncTimer=null;
+
+function getSyncInterval(){
+  return SYNC_INTERVALS[Math.min(syncFailCount, SYNC_INTERVALS.length-1)];
+}
+
+// ============================================================
+// 同期ステータス表示
+// ============================================================
+function updateSyncStatus(status){
+  const el=document.getElementById('sync-status-text');
+  if(!el)return;
+  if(status==='synced'){
+    el.className='sync-status synced';
+    el.textContent='✓ 同期済み'+(lastSyncTime?' '+lastSyncTime:'');
+  }else if(status==='syncing'){
+    el.className='sync-status syncing';
+    el.textContent='🔄 同期中...';
+  }else if(status==='error'){
+    el.className='sync-status error';
+    el.textContent='⚠️ 同期エラー';
+  }else if(status==='offline'){
+    el.className='sync-status offline';
+    el.textContent='📴 オフライン';
+  }else{
+    el.className='sync-status';
+    el.textContent='';
+  }
+}
+
+// ============================================================
+// 自動同期スケジューラ（バックオフ付き）
+// ============================================================
+function startAutoSync(){
+  function scheduleNext(){
+    if(syncTimer)clearTimeout(syncTimer);
+    syncTimer=setTimeout(function(){
+      syncTimer=null;
+      if(gdriveToken&&navigator.onLine&&!document.hidden){
+        syncFromGoogleDrive(function(){scheduleNext();});
+      }else{
+        scheduleNext();
+      }
+    },getSyncInterval());
+  }
+  scheduleNext();
+
+  // オンライン復帰時に即同期
+  window.addEventListener('online',function(){
+    if(gdriveToken&&!document.hidden){
+      syncFailCount=0;
+      syncFromGoogleDrive(function(){});
+    }
+    updateSyncStatus('synced');
+  });
+  window.addEventListener('offline',function(){
+    updateSyncStatus('offline');
+  });
+
+  // フォアグラウンド復帰時に同期
+  document.addEventListener('visibilitychange',function(){
+    if(!document.hidden&&gdriveToken&&navigator.onLine){
+      syncFromGoogleDrive(function(){});
+    }
+  });
+}
+
+function stopAutoSync(){
+  if(syncTimer){clearTimeout(syncTimer);syncTimer=null;}
+}
+
+// ============================================================
+// Drive → ローカル同期（タイムスタンプ競合解決付き）
+// ============================================================
+function syncFromGoogleDrive(callback){
+  if(!gdriveToken||!gdriveFileId){if(callback)callback();return;}
+  if(!navigator.onLine){updateSyncStatus('offline');if(callback)callback();return;}
+  if(!document.hidden)updateSyncStatus('syncing');
+  fetch('https://www.googleapis.com/drive/v3/files/'+gdriveFileId+'?alt=media',{
+    headers:{'Authorization':'Bearer '+gdriveToken}
+  }).then(function(r){
+    if(r.status===401)throw new Error('401');
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    return r.json();
+  }).then(function(driveData){
+    syncFailCount=0;
+    if(!driveData.checkData){
+      updateSyncStatus('synced');
+      if(callback)callback();
+      return;
+    }
+    const driveTime=driveData.lastSync?new Date(driveData.lastSync).getTime():0;
+    const localSyncStr=localStorage.getItem('monitorLastSync');
+    const localTime=localSyncStr?new Date(localSyncStr).getTime():0;
+
+    if(driveTime>localTime){
+      // Drive優先
+      state.checkData=driveData.checkData;
+      localStorage.setItem('monitorCheckData',JSON.stringify(state.checkData));
+      localStorage.setItem('monitorLastSync',driveData.lastSync);
+      checkDateChange();
+      loadCurrentChannel();
+      render();
+    }else if(localTime>driveTime){
+      // ローカル優先 → Driveに上書きアップロード
+      uploadToGoogleDrive();
+    }
+    lastSyncTime=new Date().toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit'});
+    updateSyncStatus('synced');
+    if(callback)callback();
+  }).catch(function(e){
+    console.error('同期エラー:',e);
+    syncFailCount=Math.min(syncFailCount+1, SYNC_INTERVALS.length-1);
+    if(e.message&&e.message.indexOf('401')>=0){
+      // トークン切れ → バナーではなくアラートで確実に通知
+      handleTokenExpired();
+    }else{
+      updateSyncStatus('error');
+    }
+    if(callback)callback();
+  });
+}
+
+// ============================================================
+// トークン切れ処理
+// ============================================================
+function handleTokenExpired(){
+  gdriveToken=null;gdriveFileId=null;
+  localStorage.removeItem('gdriveToken');localStorage.removeItem('gdriveFileId');
+  stopAutoSync();
+  updateGDriveUI();
+  updateSyncStatus('none');
+  alert('⚠️ Google Driveのログインが切れました。\n\n「☁️ Google Drive連携」ボタンを押して再接続してください。');
+}
+
+// ============================================================
+// ローカル → Drive アップロード
+// ============================================================
+function uploadToGoogleDrive(){
+  if(!gdriveToken)return;
+  if(!navigator.onLine){updateSyncStatus('offline');return;}
+  const now=new Date().toISOString();
+  const data={checkData:state.checkData,lastSync:now,version:'1.0'};
+  const metadata={name:GDRIVE_FILE_NAME,mimeType:'application/json'};
+  const form=new FormData();
+  form.append('metadata',new Blob([JSON.stringify(metadata)],{type:'application/json'}));
+  form.append('file',new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));
+  const url=gdriveFileId
+    ?'https://www.googleapis.com/upload/drive/v3/files/'+gdriveFileId+'?uploadType=multipart'
+    :'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart';
+  const method=gdriveFileId?'PATCH':'POST';
+  fetch(url,{method,headers:{'Authorization':'Bearer '+gdriveToken},body:form})
+    .then(r=>{
+      if(r.status===401)throw new Error('401');
+      return r.json();
+    })
+    .then(result=>{
+      if(result.id){
+        gdriveFileId=result.id;
+        localStorage.setItem('gdriveFileId',gdriveFileId);
+        localStorage.setItem('monitorLastSync',now);
+        lastSyncTime=new Date().toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit'});
+        updateSyncStatus('synced');
+        updateGDriveUI();
+      }
+    })
+    .catch(e=>{
+      if(e.message&&e.message.indexOf('401')>=0)handleTokenExpired();
+      else updateSyncStatus('error');
+    });
+}
+
+// ============================================================
+// 手動同期
+// ============================================================
+function manualSync(){
+  if(!gdriveToken){alert('Google Drive連携が必要です');return;}
+  if(!navigator.onLine){alert('オフラインのため同期できません\n\nWi-Fiに接続してから再度お試しください');return;}
+  const btn=document.getElementById('manual-sync-btn');
+  if(btn){btn.disabled=true;btn.textContent='同期中...';}
+  syncFromGoogleDrive(function(){
+    if(btn){btn.disabled=false;btn.textContent='🔄 今すぐ同期';}
+  });
+}
 
 function getCurrentChannel(){
   const ward=wardsConfig[state.currentWardKey];
@@ -245,7 +445,8 @@ function saveAndNext(){
     checkedAt:new Date().toISOString(),checkedToday:true,isEmpty:false
   };
   localStorage.setItem('monitorCheckData',JSON.stringify(state.checkData));
-  if(gdriveToken)uploadToGoogleDrive();
+  if(gdriveToken&&navigator.onLine)uploadToGoogleDrive();
+
   if(isAllChecked()){
     appendToMonthlyExcel(getTodayString(),state.checkData).then(()=>{
       state.showSummary=true;render();
@@ -262,7 +463,8 @@ function markEmpty(){
     checkedAt:new Date().toISOString(),checkedToday:true,isEmpty:true
   };
   localStorage.setItem('monitorCheckData',JSON.stringify(state.checkData));
-  if(gdriveToken)uploadToGoogleDrive();
+  if(gdriveToken&&navigator.onLine)uploadToGoogleDrive();
+
   if(isAllChecked()){
     appendToMonthlyExcel(getTodayString(),state.checkData).then(()=>{
       state.showSummary=true;render();
@@ -306,7 +508,6 @@ function autoSaveCurrent(){
     state.currentInput.spo2Only;
   if(!hasAnyInput)return;
   const existing=state.checkData[channelId];
-  // autoSaveはcheckedTodayを変更しない（既存値を維持、なければfalse）
   state.checkData[channelId]={
     ...state.currentInput,roomNumber:fullRoom,
     checkedAt:new Date().toISOString(),
@@ -357,9 +558,6 @@ function toggleAlarm(key){
   render();
 }
 
-// ============================================================
-// 背景色：checkedToday===true のときだけ状態色、それ以外は暗色
-// ============================================================
 function getChannelBgClass(data){
   if(!data)return 'channel-bg-unchecked';
   if(data.checkedToday!==true)return 'channel-bg-unchecked';
@@ -399,8 +597,6 @@ function render(){
     if(idx<rowsPerCol)leftChannels.push({ch,idx});
     else rightChannels.push({ch,idx});
   });
-
-  // 最後のチャンネルかどうか
   const lastWardKey=wardKeys[wardKeys.length-1];
   const lastWard=wardsConfig[lastWardKey];
   const lastMonitorIdx=lastWard.monitors.length-1;
@@ -416,9 +612,16 @@ function render(){
             <div class="stats-num">${stats.checked}/${stats.total}</div>
             ${stats.alarms>0?`<div class="stats-alarm">アラーム ${stats.alarms}</div>`:''}
           </div>
-          <button class="btn btn-primary" id="gdrive-btn" onclick="toggleGoogleDrive()" style="background:#4285f4">☁️ Google Drive連携</button>
-          ${stats.complete?'<button class="btn btn-success" onclick="showSummaryManual()">サマリー表示</button>':''}
-          <div id="gdrive-status" style="font-size:11px;color:#059669;margin-top:4px;display:none;">✓ 同期済み</div>
+          <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;">
+            <div style="display:flex;gap:8px;">
+              <button class="btn" id="gdrive-btn" onclick="toggleGoogleDrive()" style="background:#4285f4;color:#fff">☁️ Google Drive連携</button>
+              <button class="btn" id="manual-sync-btn" onclick="manualSync()" style="background:#0ea5e9;color:#fff;display:none">🔄 今すぐ同期</button>
+              ${stats.complete?'<button class="btn btn-success" onclick="showSummaryManual()">サマリー表示</button>':''}
+            </div>
+            <div class="sync-bar">
+              <span id="sync-status-text" class="sync-status"></span>
+            </div>
+          </div>
         </div>
       </div>
       <div class="ward-tabs">
@@ -475,7 +678,7 @@ function render(){
             <div class="room-prefix">${ward.floor}</div>
             <input type="tel" inputmode="numeric" pattern="[0-9]*" class="input room-suffix"
                    value="${state.roomNumberSuffix}"
-                   oninput="updateRoom(this.value)" onfocus="handleRoomInputFocus()" onblur="handleRoomInputBlur()" placeholder="01" maxlength="2">
+                   oninput="updateRoom(this.value)" onfocus="handleInputFocus(this)" onblur="handleInputBlur()" placeholder="01" maxlength="2">
           </div>
         </div>
         <div class="form-group">
@@ -483,7 +686,7 @@ function render(){
           <div class="name-input-group">
             <input type="text" class="input" style="flex:1"
                    value="${state.currentInput.patientName}"
-                   oninput="updateName(this.value)" onfocus="handleRoomInputFocus()" onblur="handleRoomInputBlur()" placeholder="山田 太郎" lang="ja" autocomplete="name">
+                   oninput="updateName(this.value)" onfocus="handleInputFocus(this)" onblur="handleInputBlur()" placeholder="山田 太郎" lang="ja" autocomplete="name">
             <button class="btn-icon btn-blue" onclick="showHandwritingModal()" title="手書き検索" style="font-size:18px;">✏️</button>
             <button class="btn-icon btn-yellow" onclick="clearCurrent()" title="クリア">✕</button>
           </div>
@@ -523,6 +726,7 @@ function render(){
   if(state.showSummary)renderSummary();
   updateGDriveUI();
   updateSaveButtonState();
+  if(!navigator.onLine)updateSyncStatus('offline');
 }
 
 function renderChannelCard(ch,idx){
@@ -626,10 +830,12 @@ function getMonthString(){
 }
 
 // ============================================================
-// Excel月次ファイルへの追記（当日分は上書き防止で一度削除して追加）
+// Excel月次ファイルへの追記
 // ============================================================
 const EXCEL_HEADERS=['日付','病棟','セントラル','チャンネル','部屋番号','患者氏名',
   'SpO2アラーム','電極確認','電池交換','電波切れ','一時退室','入退床忘れ','SpO2のみ','空床','備考'];
+const EXCEL_COL_WIDTHS=[{wch:12},{wch:10},{wch:10},{wch:10},{wch:10},{wch:14},
+  {wch:12},{wch:10},{wch:10},{wch:10},{wch:12},{wch:12},{wch:10},{wch:6},{wch:16}];
 
 function buildRowsForDate(dateStr,checkData){
   const rows=[];
@@ -654,11 +860,9 @@ function buildRowsForDate(dateStr,checkData){
   return rows;
 }
 
-const EXCEL_COL_WIDTHS=[{wch:12},{wch:10},{wch:10},{wch:10},{wch:10},{wch:14},
-  {wch:12},{wch:10},{wch:10},{wch:10},{wch:12},{wch:12},{wch:10},{wch:6},{wch:16}];
-
 async function appendToMonthlyExcel(dateStr,checkData){
   if(!gdriveToken)return;
+  if(!navigator.onLine){console.warn('オフラインのためExcel保存スキップ');return;}
   const monthStr=getMonthString();
   const fileName=`ラウンド記録_${monthStr}.xlsx`;
   const newRows=buildRowsForDate(dateStr,checkData);
@@ -668,6 +872,7 @@ async function appendToMonthlyExcel(dateStr,checkData){
       `https://www.googleapis.com/drive/v3/files?q=name='${fileName}'&fields=files(id)`,
       {headers:{'Authorization':'Bearer '+gdriveToken}}
     );
+    if(searchRes.status===401){handleTokenExpired();return;}
     const searchData=await searchRes.json();
     const existingId=searchData.files&&searchData.files.length>0?searchData.files[0].id:null;
     let wb;
@@ -687,7 +892,6 @@ async function appendToMonthlyExcel(dateStr,checkData){
     const sheetName=wb.SheetNames[0];
     const ws=wb.Sheets[sheetName];
     const existingData=XLSX.utils.sheet_to_json(ws,{header:1});
-    // 当日分を削除してから追加（重複防止）
     const filtered=existingData.filter((row,idx)=>idx===0||row[0]!==dateStr);
     newRows.forEach(row=>filtered.push(row));
     const newWs=XLSX.utils.aoa_to_sheet(filtered);
@@ -704,12 +908,11 @@ async function appendToMonthlyExcel(dateStr,checkData){
       :'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart';
     const method=existingId?'PATCH':'POST';
     await fetch(url,{method,headers:{'Authorization':'Bearer '+gdriveToken},body:form});
-    console.log(`Excel保存完了: ${fileName}`);
   }catch(err){console.error('Excel保存エラー:',err);}
 }
 
 // ============================================================
-// Google Drive連携
+// Google Drive 認証・UI
 // ============================================================
 function toggleGoogleDrive(){
   if(gdriveToken){if(confirm('Google Drive連携を解除しますか？'))disconnectGoogleDrive();}
@@ -727,8 +930,10 @@ function connectGoogleDrive(){
 function disconnectGoogleDrive(){
   gdriveToken=null;gdriveFileId=null;
   localStorage.removeItem('gdriveToken');localStorage.removeItem('gdriveFileId');
-  if(syncInterval){clearInterval(syncInterval);syncInterval=null;}
-  updateGDriveUI();alert('Google Drive連携を解除しました');
+  stopAutoSync();
+  updateGDriveUI();
+  updateSyncStatus('none');
+  alert('Google Drive連携を解除しました');
 }
 function handleGoogleDriveCallback(){
   const hash=window.location.hash;
@@ -736,7 +941,8 @@ function handleGoogleDriveCallback(){
     const params=new URLSearchParams(hash.substring(1));
     const token=params.get('access_token');
     if(token){
-      gdriveToken=token;localStorage.setItem('gdriveToken',token);
+      gdriveToken=token;
+      localStorage.setItem('gdriveToken',token);
       window.history.replaceState({},document.title,window.location.pathname);
       initGoogleDriveSync();
     }
@@ -749,102 +955,44 @@ async function initGoogleDriveSync(){
       'https://www.googleapis.com/drive/v3/files?q=name="'+GDRIVE_FILE_NAME+'"&fields=files(id,name)',
       {headers:{'Authorization':'Bearer '+gdriveToken}}
     );
+    if(response.status===401){handleTokenExpired();return;}
     const data=await response.json();
     if(data.files&&data.files.length>0){
       gdriveFileId=data.files[0].id;
       localStorage.setItem('gdriveFileId',gdriveFileId);
-      await downloadFromGoogleDrive();
+      syncFromGoogleDrive(function(){});
     }else{
-      await uploadToGoogleDrive();
+      uploadToGoogleDrive();
     }
-    if(syncInterval)clearInterval(syncInterval);
-    syncInterval=setInterval(uploadToGoogleDrive,5*60*1000);
+    startAutoSync();
   }catch(err){
     console.error('Google Drive初期化エラー:',err);
-    alert('Google Drive連携に失敗しました。再度お試しください。');
+    if(!navigator.onLine){
+      updateSyncStatus('offline');
+      // オフラインでも自動同期スケジューラは起動しておく（復帰時に同期するため）
+      startAutoSync();
+    }else{
+      alert('Google Drive連携に失敗しました。再度お試しください。');
+    }
   }
 }
-function showTokenExpiredBanner(){
-  gdriveToken=null;
-  localStorage.removeItem('gdriveToken');localStorage.removeItem('gdriveFileId');
-  if(syncInterval){clearInterval(syncInterval);syncInterval=null;}
-  const banner=document.getElementById('token-banner');if(banner)banner.classList.add('show');
-  const btn=document.getElementById('gdrive-btn');if(btn){btn.textContent='☁️ 再接続が必要';btn.style.background='#dc2626';}
-  const status=document.getElementById('gdrive-status');if(status)status.style.display='none';
-}
-async function uploadToGoogleDrive(){
-  if(!gdriveToken)return;
-  const data={checkData:state.checkData,lastSync:new Date().toISOString(),version:'1.0'};
-  const metadata={name:GDRIVE_FILE_NAME,mimeType:'application/json'};
-  const form=new FormData();
-  form.append('metadata',new Blob([JSON.stringify(metadata)],{type:'application/json'}));
-  form.append('file',new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));
-  try{
-    const url=gdriveFileId
-      ?'https://www.googleapis.com/upload/drive/v3/files/'+gdriveFileId+'?uploadType=multipart'
-      :'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart';
-    const method=gdriveFileId?'PATCH':'POST';
-    const response=await fetch(url,{method,headers:{'Authorization':'Bearer '+gdriveToken},body:form});
-    if(response.status===401){showTokenExpiredBanner();return;}
-    const result=await response.json();
-    if(result.id){
-      gdriveFileId=result.id;localStorage.setItem('gdriveFileId',gdriveFileId);
-      lastSyncTime=new Date().toLocaleTimeString('ja-JP');
-      // ローカルの最終同期時刻も更新
-      localStorage.setItem('monitorLastSync',data.lastSync);
-      updateGDriveUI();
-    }
-  }catch(err){console.error('Google Driveアップロードエラー:',err);}
-}
-
-// ============================================================
-// Drive/ローカル競合：タイムスタンプで新しい方を採用
-// ============================================================
-async function downloadFromGoogleDrive(){
-  if(!gdriveToken||!gdriveFileId)return;
-  try{
-    const response=await fetch(
-      'https://www.googleapis.com/drive/v3/files/'+gdriveFileId+'?alt=media',
-      {headers:{'Authorization':'Bearer '+gdriveToken}}
-    );
-    const driveData=await response.json();
-    if(!driveData.checkData)return;
-    const driveTime=driveData.lastSync?new Date(driveData.lastSync).getTime():0;
-    const localSyncStr=localStorage.getItem('monitorLastSync');
-    const localTime=localSyncStr?new Date(localSyncStr).getTime():0;
-    if(driveTime>=localTime){
-      // Drive優先
-      state.checkData=driveData.checkData;
-      localStorage.setItem('monitorCheckData',JSON.stringify(state.checkData));
-      localStorage.setItem('monitorLastSync',driveData.lastSync);
-    }else{
-      // ローカル優先 → Driveに上書きアップロード
-      await uploadToGoogleDrive();
-    }
-    await checkDateChange();
-    loadCurrentChannel();render();
-    lastSyncTime=new Date().toLocaleTimeString('ja-JP');
-    updateGDriveUI();
-  }catch(err){console.error('Google Driveダウンロードエラー:',err);}
-}
-
 function updateGDriveUI(){
   const btn=document.getElementById('gdrive-btn');
-  const status=document.getElementById('gdrive-status');
+  const manualBtn=document.getElementById('manual-sync-btn');
   const banner=document.getElementById('token-banner');
   if(!btn)return;
   if(gdriveToken){
     btn.textContent='☁️ 連携中';btn.style.background='#34a853';
-    if(status){status.style.display='block';status.textContent=lastSyncTime?'✓ 最終同期: '+lastSyncTime:'✓ 同期済み';}
+    if(manualBtn)manualBtn.style.display='inline-block';
     if(banner)banner.classList.remove('show');
   }else{
     btn.textContent='☁️ Google Drive連携';btn.style.background='#4285f4';
-    if(status)status.style.display='none';
+    if(manualBtn)manualBtn.style.display='none';
   }
 }
 
 // ============================================================
-// 日付リセット：翌日起動時にExcel追記 → アラームリセット
+// 日付リセット
 // ============================================================
 async function saveHistoricalData(){
   const lastDate=localStorage.getItem('monitorLastDate');
@@ -868,6 +1016,48 @@ async function checkDateChange(){
     resetAlarmsForNewDay();
   }
   localStorage.setItem('monitorLastDate',today);
+}
+
+// ============================================================
+// キーボード閉じるボタン（viewport対応版）
+// ============================================================
+let lastFocusedInput=null;
+function handleInputFocus(el){
+  lastFocusedInput=el;
+  const btn=document.getElementById('keyboard-close-btn');
+  if(!btn)return;
+  btn.style.display='flex';
+  if(window.visualViewport){
+    setTimeout(function(){
+      const v=window.visualViewport.height;
+      const w=window.innerHeight;
+      const k=w-v;
+      btn.style.bottom=(k>100?k+10:280)+'px';
+    },100);
+  }else{btn.style.bottom='280px';}
+}
+function handleInputBlur(){
+  setTimeout(function(){
+    const btn=document.getElementById('keyboard-close-btn');
+    if(btn)btn.style.display='none';
+  },200);
+}
+function setupKeyboardCloseBtn(){
+  const closeBtn=document.createElement('button');
+  closeBtn.id='keyboard-close-btn';closeBtn.className='close-btn-fixed';
+  closeBtn.innerHTML='✕';
+  closeBtn.onclick=()=>{if(document.activeElement)document.activeElement.blur();};
+  document.body.appendChild(closeBtn);
+  if(window.visualViewport){
+    window.visualViewport.addEventListener('resize',function(){
+      const btn=document.getElementById('keyboard-close-btn');
+      if(!btn||btn.style.display==='none')return;
+      const v=window.visualViewport.height;
+      const w=window.innerHeight;
+      const k=w-v;
+      btn.style.bottom=(k>100?k+10:280)+'px';
+    });
+  }
 }
 
 // ============================================================
@@ -949,26 +1139,23 @@ function hideHandwritingModal(){
   const modal=document.getElementById('hw-modal');if(modal)modal.remove();
   const btn=document.getElementById('hw-close-btn');if(btn)btn.remove();
 }
-function setupKeyboardCloseBtn(){
-  const closeBtn=document.createElement('button');
-  closeBtn.id='keyboard-close-btn';closeBtn.className='close-btn-fixed';
-  closeBtn.innerHTML='✕';
-  closeBtn.onclick=()=>{document.activeElement&&document.activeElement.blur();closeBtn.style.display='none';};
-  document.body.appendChild(closeBtn);
-}
-function handleRoomInputFocus(){const b=document.getElementById('keyboard-close-btn');if(b)b.style.display='flex';}
-function handleRoomInputBlur(){const b=document.getElementById('keyboard-close-btn');if(b)setTimeout(()=>{b.style.display='none';},200);}
 
 window.addEventListener('load',async()=>{
   handleGoogleDriveCallback();
   const saved=localStorage.getItem('monitorCheckData');
   if(saved){try{state.checkData=JSON.parse(saved);}catch(e){}}
   await checkDateChange();
-  loadCurrentChannel();render();
+  loadCurrentChannel();
+  render();
   setupKeyboardCloseBtn();
   const savedToken=localStorage.getItem('gdriveToken');
   const savedFileId=localStorage.getItem('gdriveFileId');
-  if(savedToken){gdriveToken=savedToken;gdriveFileId=savedFileId;initGoogleDriveSync();}
+  if(savedToken){
+    gdriveToken=savedToken;gdriveFileId=savedFileId;
+    initGoogleDriveSync();
+  }
+  // 初期オフライン状態を反映
+  if(!navigator.onLine)updateSyncStatus('offline');
 });
 </script>
 </body>
