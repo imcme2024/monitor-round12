@@ -158,7 +158,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 
 const wardsConfig={
   W7:{name:'西7病棟',floor:'7',color:'purple',monitors:[
-    {id:1,name:'①',channels:['2006','2008','2012','2035','2046','2049','2061','2074','2081','2091','5009','5027']},
+    {id:1,name:'①',channels:['2006','2008','2012','6051','2046','2049','2061','2074','2081','2091','5009','5027']},
     {id:2,name:'②',channels:['5032','5039','5060','4009','4027','4032','4039','4060']}
   ]},
   E7:{name:'東7病棟',floor:'7',color:'blue',monitors:[
@@ -189,6 +189,9 @@ const wardsConfig={
   ]}
 };
 const wardKeys=['W7','E7','W6','E6','W5','E5'];
+
+// ベッドサイドモニタ常設チャンネル一覧
+const PERMANENT_CHANNELS=new Set(['6051','2046','2049']);
 
 let state={
   currentWardKey:'W7',currentMonitorIndex:0,currentChannelIndex:0,
@@ -784,7 +787,7 @@ function renderChannelCard(ch,idx){
   return`
     <button class="channel-card ${bgClass}${isCurrent?' channel-card-active':''}" onclick="jumpToChannel(${idx})">
       <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;min-height:24px;">
-        <div class="channel-id">ch${ch}</div>
+        <div class="channel-id">ch${ch}${PERMANENT_CHANNELS.has(ch)?'<span title="ベッドサイドモニタ常設" style="font-size:10px;margin-left:3px;opacity:0.85;">🖥️</span>':''}</div>
         ${data?.roomNumber?`<div class="channel-room">${data.roomNumber}</div>`:''}
         ${data?.patientName?`<div class="channel-name">${data.patientName}</div>`:''}
       </div>
