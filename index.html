@@ -316,7 +316,7 @@ function syncFromGoogleDrive(callback){
       // ローカル優先 → Driveに上書きアップロード
       uploadToGoogleDrive();
     }
-    lastSyncTime=new Date().toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit'});
+    lastSyncTime=new Date().toLocaleString('ja-JP',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
     updateSyncStatus('synced');
     if(callback)callback();
   }).catch(function(e){
@@ -370,7 +370,7 @@ function uploadToGoogleDrive(){
         gdriveFileId=result.id;
         localStorage.setItem('gdriveFileId',gdriveFileId);
         localStorage.setItem('monitorLastSync',now);
-        lastSyncTime=new Date().toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit'});
+        lastSyncTime=new Date().toLocaleString('ja-JP',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
         updateSyncStatus('synced');
         updateGDriveUI();
       }
@@ -435,6 +435,50 @@ function isAllChecked(){
     }
   }
   return true;
+}
+
+// 未入力チャンネルが「空床フラグ付きのもの」だけかどうかを判定
+function isOnlyUncheckedAreEmpty(){
+  let hasUncheckedEmpty=false;
+  for(const wk of wardKeys){
+    const ward=wardsConfig[wk];
+    for(const monitor of ward.monitors){
+      for(const ch of monitor.channels){
+        const d=state.checkData[`${wk}-${monitor.id}-${ch}`];
+        if(!d||d.checkedToday!==true){
+          // 未入力チャンネル：空床フラグがなければ即false
+          if(!d||!d.isEmpty)return false;
+          hasUncheckedEmpty=true;
+        }
+      }
+    }
+  }
+  return hasUncheckedEmpty;
+}
+
+// 全未入力の空床チャンネルを一括で入力済みにする
+function markAllEmptyAsChecked(){
+  wardKeys.forEach(wk=>{
+    const ward=wardsConfig[wk];
+    ward.monitors.forEach(monitor=>{
+      monitor.channels.forEach(ch=>{
+        const cid=`${wk}-${monitor.id}-${ch}`;
+        const d=state.checkData[cid];
+        if((!d||d.checkedToday!==true)&&d&&d.isEmpty){
+          state.checkData[cid]={
+            ...d,
+            checkedAt:new Date().toISOString(),checkedToday:true
+          };
+        }
+      });
+    });
+  });
+  localStorage.setItem('monitorCheckData',JSON.stringify(state.checkData));
+  if(gdriveToken&&navigator.onLine)uploadToGoogleDrive();
+  // 全部入力済みになったのでExcel保存→サマリー
+  appendToMonthlyExcel(getTodayString(),state.checkData).then(()=>{
+    state.showSummary=true;render();
+  });
 }
 
 function saveAndNext(){
@@ -606,7 +650,10 @@ function render(){
   document.getElementById('app').innerHTML=`
     <div class="card">
       <div class="header">
-        <h1 class="title">病棟モニタラウンド</h1>
+        <div>
+          <h1 class="title">病棟モニタラウンド</h1>
+          ${lastSyncTime?`<div style="font-size:11px;color:#9ca3af;margin-top:2px;">最終同期: ${lastSyncTime}</div>`:""}
+        </div>
         <div style="display:flex;align-items:center;gap:12px;">
           <div class="stats">
             <div class="stats-num">${stats.checked}/${stats.total}</div>
@@ -616,7 +663,7 @@ function render(){
             <div style="display:flex;gap:8px;">
               <button class="btn" id="gdrive-btn" onclick="toggleGoogleDrive()" style="background:#4285f4;color:#fff">☁️ Google Drive連携</button>
               <button class="btn" id="manual-sync-btn" onclick="manualSync()" style="background:#0ea5e9;color:#fff;display:none">🔄 今すぐ同期</button>
-              ${stats.complete?'<button class="btn btn-success" onclick="showSummaryManual()">サマリー表示</button>':''}
+              ${stats.complete?'<button class="btn btn-success" onclick="showSummaryManual()">📋 サマリー表示</button>':isOnlyUncheckedAreEmpty()?'<button class="btn btn-success" onclick="markAllEmptyAsChecked()">🛏️ 空床を一括入力済みにする</button>':''}
             </div>
             <div class="sync-bar">
               <span id="sync-status-text" class="sync-status"></span>
