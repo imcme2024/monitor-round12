@@ -298,11 +298,15 @@ function startAutoSync(){
   window.addEventListener('online',function(){
     if(gdriveToken&&!document.hidden){syncFailCount=0;syncFromGoogleDrive(function(){});}
     updateSyncStatus('synced');
+    // ★ オンライン復帰時に保留中のExcel保存を実行
+    flushPendingExcelSave();
   });
   window.addEventListener('offline',function(){updateSyncStatus('offline');});
   document.addEventListener('visibilitychange',function(){
     if(!document.hidden){
       checkDateChange().then(function(){loadCurrentChannel();render();if(gdriveToken&&navigator.onLine){syncFromGoogleDrive(function(){});}});
+      // ★ アプリ前面復帰時にも保留中のExcel保存を実行
+      flushPendingExcelSave();
     }
   });
 }
@@ -410,17 +414,43 @@ function markAllEmptyAsChecked(){
   appendToMonthlyExcel(getTodayString(),state.checkData).then(()=>{state.showSummary=true;render();});
 }
 
-// ★ Excel定期保存チェック（10件ごと）
+// ★ Excel保存保留フラグ
+let excelSavePending=false;
+
+// ★ Excel定期保存チェック（10件ごと・オフライン対応）
 function checkAndSaveExcel(){
   const totalChecked=Object.values(state.checkData).filter(d=>d.checkedToday===true).length;
   if(totalChecked - lastExcelSaveCount >= EXCEL_SAVE_INTERVAL){
     lastExcelSaveCount=totalChecked;
-    appendToMonthlyExcel(getTodayString(),state.checkData).then(()=>{
-      showExcelSaveIndicator();
-    }).catch(err=>{
-      console.error('定期Excel保存エラー:',err);
-    });
+    if(navigator.onLine){
+      appendToMonthlyExcel(getTodayString(),state.checkData).then(()=>{
+        excelSavePending=false;
+        showExcelSaveIndicator();
+        render();
+      }).catch(err=>{
+        console.error('定期Excel保存エラー:',err);
+        excelSavePending=true;
+        render();
+      });
+    }else{
+      // オフライン中は保留フラグを立てるだけ
+      excelSavePending=true;
+      render();
+    }
   }
+}
+
+// ★ オンライン復帰時・アプリ前面復帰時にExcel保存を実行
+function flushPendingExcelSave(){
+  if(!excelSavePending)return;
+  if(!gdriveToken||!navigator.onLine)return;
+  appendToMonthlyExcel(getTodayString(),state.checkData).then(()=>{
+    excelSavePending=false;
+    showExcelSaveIndicator();
+    render();
+  }).catch(err=>{
+    console.error('保留Excel保存エラー:',err);
+  });
 }
 
 function showExcelSaveIndicator(){
@@ -584,11 +614,13 @@ function render(){
       ? `<div class="enter-hint confirmed">✓ 確定済み</div>`
       : '';
 
-  // ★ 次のExcel保存まであと何件か表示
   const totalChecked=Object.values(state.checkData).filter(d=>d.checkedToday===true).length;
   const remaining=Math.max(0,(lastExcelSaveCount+EXCEL_SAVE_INTERVAL)-totalChecked);
   const excelStatusHtml=gdriveToken
-    ? `<div style="font-size:11px;color:#6b7280;margin-top:2px;">📊 次のExcel自動保存まで残り <strong>${remaining}</strong> 件</div>
+    ? `<div style="font-size:11px;color:#6b7280;margin-top:2px;">
+        📊 次のExcel自動保存まで残り <strong>${remaining}</strong> 件
+        ${excelSavePending?'<span style="color:#f59e0b;font-weight:700;margin-left:6px;">⏳ Wi-Fi復帰後に保存予定</span>':''}
+       </div>
        <div class="excel-save-indicator" id="excel-save-indicator">✅ Excelに保存しました</div>`
     : '';
 
