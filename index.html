@@ -362,6 +362,22 @@ function uploadToGoogleDrive(onSuccess, onError){
     });
 }
 
+function manualExcelSave(){
+  if(!gdriveToken){alert('Google Drive連携が必要です');return;}
+  if(!navigator.onLine){alert('オフラインのため保存できません\n\nWi-Fiに接続してから再度お試しください');return;}
+  const btn=document.getElementById('manual-excel-btn');
+  if(btn){btn.disabled=true;btn.textContent='保存中...';}
+  appendToMonthlyExcel(getTodayString(),state.checkData).then(()=>{
+    excelSavePending=false;
+    if(btn){btn.disabled=false;btn.textContent='📊 Excel保存';}
+    showSyncToast('✅ Excelに保存しました');
+    render();
+  }).catch(()=>{
+    if(btn){btn.disabled=false;btn.textContent='📊 Excel保存';}
+    alert('⚠️ Excel保存に失敗しました。再度お試しください。');
+  });
+}
+
 function manualSync(){
   if(!gdriveToken){alert('Google Drive連携が必要です');return;}
   if(!navigator.onLine){alert('オフラインのため同期できません\n\nWi-Fiに接続してから再度お試しください');return;}
@@ -628,7 +644,7 @@ function render(){
     <div class="card">
       <div class="header">
         <div>
-          <h1 class="title">病棟モニタラウンド <span style="font-size:11px;font-weight:500;color:#9ca3af;letter-spacing:0.02em;">v1.1</span></h1>
+          <h1 class="title">病棟モニタラウンド <span style="font-size:11px;font-weight:500;color:#9ca3af;letter-spacing:0.02em;">v1.2</span></h1>
           ${lastSyncTime?`<div style="font-size:11px;color:#9ca3af;margin-top:2px;">最終同期: ${lastSyncTime}</div>`:''}
           ${excelStatusHtml}
         </div>
@@ -641,6 +657,7 @@ function render(){
             <div style="display:flex;gap:8px;">
               <button class="btn" id="gdrive-btn" onclick="toggleGoogleDrive()" style="background:#4285f4;color:#fff">☁️ Google Drive連携</button>
               <button class="btn" id="manual-sync-btn" onclick="manualSync()" style="background:#0ea5e9;color:#fff;display:none">🔄 今すぐ同期</button>
+              <button class="btn" id="manual-excel-btn" onclick="manualExcelSave()" style="background:#16a34a;color:#fff;display:none">📊 Excel保存</button>
               ${stats.complete?'<button class="btn btn-success" onclick="showSummaryManual()">📋 サマリー表示</button>':isOnlyUncheckedAreEmpty()?'<button class="btn btn-success" onclick="markAllEmptyAsChecked()">🛏️ 空床を一括入力済みにする</button>':''}
             </div>
             <div class="sync-bar"><span id="sync-status-text" class="sync-status"></span></div>
@@ -903,8 +920,8 @@ async function initGoogleDriveSync(isStartup){
 function updateGDriveUI(){
   const btn=document.getElementById('gdrive-btn');const manualBtn=document.getElementById('manual-sync-btn');const banner=document.getElementById('token-banner');
   if(!btn)return;
-  if(gdriveToken){btn.textContent='☁️ 連携中';btn.style.background='#34a853';if(manualBtn)manualBtn.style.display='inline-block';if(banner)banner.classList.remove('show');}
-  else{btn.textContent='☁️ Google Drive連携';btn.style.background='#4285f4';if(manualBtn)manualBtn.style.display='none';}
+  if(gdriveToken){btn.textContent='☁️ 連携中';btn.style.background='#34a853';if(manualBtn)manualBtn.style.display='inline-block';const excelBtn=document.getElementById('manual-excel-btn');if(excelBtn)excelBtn.style.display='inline-block';if(banner)banner.classList.remove('show');}
+  else{btn.textContent='☁️ Google Drive連携';btn.style.background='#4285f4';if(manualBtn)manualBtn.style.display='none';const excelBtn=document.getElementById('manual-excel-btn');if(excelBtn)excelBtn.style.display='none';}
 }
 
 async function saveHistoricalData(){const lastDate=localStorage.getItem('monitorLastDate');if(lastDate)await appendToMonthlyExcel(lastDate,state.checkData);}
