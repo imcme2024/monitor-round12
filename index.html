@@ -128,29 +128,18 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .teal{background:#0d9488;}.teal-light{background:#ccfbf1;}.teal-text{color:#0d9488;}
 .orange{background:#ea580c;}.orange-light{background:#ffedd5;}.orange-text{color:#ea580c;}
 .pink{background:#db2777;}.pink-light{background:#fce7f3;}.pink-text{color:#db2777;}
-
-/* Enter確定ヒント */
-.enter-hint{
-  font-size:11px;color:#6b7280;margin-top:4px;display:flex;align-items:center;gap:4px;
-}
-.enter-hint-key{
-  display:inline-block;background:#f3f4f6;border:1px solid #d1d5db;border-radius:4px;
-  padding:1px 5px;font-size:10px;font-weight:700;color:#374151;
-}
+.enter-hint{font-size:11px;color:#6b7280;margin-top:4px;display:flex;align-items:center;gap:4px;}
+.enter-hint-key{display:inline-block;background:#f3f4f6;border:1px solid #d1d5db;border-radius:4px;padding:1px 5px;font-size:10px;font-weight:700;color:#374151;}
 .enter-hint.confirmed{color:#059669;}
-
-/* 同期ステータスバー */
 .sync-bar{display:flex;align-items:center;gap:8px;font-size:12px;margin-top:4px;}
 .sync-status{font-weight:600;}
 .sync-status.synced{color:#059669;}
 .sync-status.syncing{color:#f59e0b;}
 .sync-status.error{color:#dc2626;}
 .sync-status.offline{color:#6b7280;}
-
 .token-banner{display:none;position:sticky;top:0;z-index:300;background:#dc2626;color:#fff;padding:10px 16px;font-size:13px;font-weight:700;text-align:center;border-radius:0 0 8px 8px;box-shadow:0 4px 8px rgba(220,38,38,0.4);}
 .token-banner.show{display:block;}
 .token-banner span{color:#fde68a;text-decoration:underline;cursor:pointer;}
-
 .btn-save-next{
   padding:10px 20px;border:none;border-radius:10px;font-weight:700;font-size:15px;
   cursor:pointer;transition:all 0.2s;font-family:inherit;
@@ -169,7 +158,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
   box-shadow:none;cursor:not-allowed;
   transform:none;
 }
-
 .loading-overlay{
   position:fixed;inset:0;background:linear-gradient(135deg,#0f172a,#1e3a5f);
   display:flex;flex-direction:column;align-items:center;justify-content:center;
@@ -183,7 +171,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 @keyframes spin{to{transform:rotate(360deg);}}
 .loading-text{color:#e0f2fe;font-size:16px;font-weight:600;letter-spacing:0.04em;}
 .loading-sub{color:#7dd3fc;font-size:13px;}
-
 .sync-toast{
   position:fixed;top:16px;left:50%;transform:translateX(-50%) translateY(-80px);
   background:#065f46;color:#fff;padding:12px 24px;border-radius:12px;
@@ -193,6 +180,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
   white-space:nowrap;
 }
 .sync-toast.show{transform:translateX(-50%) translateY(0);}
+/* Excel保存インジケーター */
+.excel-save-indicator{
+  font-size:11px;color:#059669;font-weight:600;
+  display:none;align-items:center;gap:4px;margin-top:2px;
+}
+.excel-save-indicator.show{display:flex;}
 </style>
 </head>
 <body>
@@ -243,11 +236,15 @@ const wardsConfig={
 const wardKeys=['W7','E7','W6','E6','W5','E5'];
 const PERMANENT_CHANNELS=new Set(['6051','2046','2049']);
 
+// ★ 10件ごとにExcel保存
+const EXCEL_SAVE_INTERVAL=10;
+let lastExcelSaveCount=0;
+
 let state={
   currentWardKey:'W7',currentMonitorIndex:0,currentChannelIndex:0,
   checkData:{},roomNumberSuffix:'',showSummary:false,currentInput:emptyInput(),
   pendingMonitorChange:false,
-  inputConfirmed:false  // ← テキスト入力をEnterで確定したかどうか
+  inputConfirmed:false
 };
 
 function emptyInput(){
@@ -256,7 +253,7 @@ function emptyInput(){
 }
 
 // ============================================================
-// Google Drive 連携 変数
+// Google Drive 連携
 // ============================================================
 let gdriveToken=null,gdriveFileId=null,lastSyncTime='';
 const GDRIVE_FILE_NAME='monitor-round-data.json';
@@ -334,14 +331,17 @@ function syncFromGoogleDrive(callback,isStartup){
     });
 }
 
+// ★ トークン切れ：アラートで明示通知
 function handleTokenExpired(){
   gdriveToken=null;gdriveFileId=null;localStorage.removeItem('gdriveToken');localStorage.removeItem('gdriveFileId');
   stopAutoSync();updateGDriveUI();updateSyncStatus('none');
-  alert('⚠️ Google Driveのログインが切れました。\n\n「☁️ Google Drive連携」ボタンを押して再接続してください。');
+  alert('⚠️ Google Driveのログインが切れました。\n\nデータの保存が停止しています。\n「☁️ Google Drive連携」ボタンを押して再接続してください。');
 }
 
-function uploadToGoogleDrive(){
-  if(!gdriveToken)return;if(!navigator.onLine){updateSyncStatus('offline');return;}
+// ★ コールバック付きuploadToGoogleDrive（失敗時通知のため）
+function uploadToGoogleDrive(onSuccess, onError){
+  if(!gdriveToken){if(onError)onError('no_token');return;}
+  if(!navigator.onLine){updateSyncStatus('offline');if(onError)onError('offline');return;}
   const now=new Date().toISOString();const data={checkData:state.checkData,lastSync:now,version:'1.0'};
   const form=new FormData();
   form.append('metadata',new Blob([JSON.stringify({name:GDRIVE_FILE_NAME,mimeType:'application/json'})],{type:'application/json'}));
@@ -350,8 +350,12 @@ function uploadToGoogleDrive(){
   fetch(url,{method:gdriveFileId?'PATCH':'POST',headers:{'Authorization':'Bearer '+gdriveToken},body:form})
     .then(r=>{if(r.status===401)throw new Error('401');return r.json();})
     .then(result=>{
-      if(result.id){gdriveFileId=result.id;localStorage.setItem('gdriveFileId',gdriveFileId);localStorage.setItem('monitorLastSync',now);lastSyncTime=new Date().toLocaleString('ja-JP',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});updateSyncStatus('synced');updateGDriveUI();}
-    }).catch(e=>{if(e.message&&e.message.indexOf('401')>=0)handleTokenExpired();else updateSyncStatus('error');});
+      if(result.id){gdriveFileId=result.id;localStorage.setItem('gdriveFileId',gdriveFileId);localStorage.setItem('monitorLastSync',now);lastSyncTime=new Date().toLocaleString('ja-JP',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});updateSyncStatus('synced');updateGDriveUI();if(onSuccess)onSuccess();}
+      else{if(onError)onError('no_id');}
+    }).catch(e=>{
+      if(e.message&&e.message.indexOf('401')>=0)handleTokenExpired();
+      else{updateSyncStatus('error');if(onError)onError(e.message);}
+    });
 }
 
 function manualSync(){
@@ -377,7 +381,6 @@ function loadCurrentChannel(){
     if(saved.roomNumber&&saved.roomNumber.startsWith(ward.floor))
       state.roomNumberSuffix=saved.roomNumber.substring(1);
     else state.roomNumberSuffix='';
-    // 保存済みデータがあれば確定済み扱い
     state.inputConfirmed=true;
   }else{
     state.currentInput=emptyInput();
@@ -407,12 +410,42 @@ function markAllEmptyAsChecked(){
   appendToMonthlyExcel(getTodayString(),state.checkData).then(()=>{state.showSummary=true;render();});
 }
 
+// ★ Excel定期保存チェック（10件ごと）
+function checkAndSaveExcel(){
+  const totalChecked=Object.values(state.checkData).filter(d=>d.checkedToday===true).length;
+  if(totalChecked - lastExcelSaveCount >= EXCEL_SAVE_INTERVAL){
+    lastExcelSaveCount=totalChecked;
+    appendToMonthlyExcel(getTodayString(),state.checkData).then(()=>{
+      showExcelSaveIndicator();
+    }).catch(err=>{
+      console.error('定期Excel保存エラー:',err);
+    });
+  }
+}
+
+function showExcelSaveIndicator(){
+  const el=document.getElementById('excel-save-indicator');
+  if(el){el.classList.add('show');setTimeout(()=>el.classList.remove('show'),3000);}
+}
+
 function saveAndNext(){
   const{ward,channelId}=getCurrentChannel();
   const fullRoom=state.roomNumberSuffix?`${ward.floor}${state.roomNumberSuffix}`:'';
   state.checkData[channelId]={...state.currentInput,roomNumber:fullRoom,checkedAt:new Date().toISOString(),checkedToday:true,isEmpty:false};
   localStorage.setItem('monitorCheckData',JSON.stringify(state.checkData));
-  if(gdriveToken&&navigator.onLine)uploadToGoogleDrive();
+
+  // ★ JSON同期（失敗時にアラート）
+  if(gdriveToken&&navigator.onLine){
+    uploadToGoogleDrive(null,(err)=>{
+      if(err&&err!=='offline'){
+        alert('⚠️ Google Driveへの保存に失敗しました。\n\nWi-Fiと接続状態を確認し、「🔄 今すぐ同期」を押してください。\n（ローカルには保存済みです）');
+      }
+    });
+  }
+
+  // ★ 10件ごとExcel保存チェック
+  checkAndSaveExcel();
+
   if(isAllChecked()){appendToMonthlyExcel(getTodayString(),state.checkData).then(()=>{state.showSummary=true;render();});return;}
   const curWard=wardsConfig[state.currentWardKey];
   const curMonitor=curWard.monitors[state.currentMonitorIndex];
@@ -428,7 +461,14 @@ function markEmpty(){
   const{channelId}=getCurrentChannel();
   state.checkData[channelId]={...emptyInput(),roomNumber:'',remarks:'空床',checkedAt:new Date().toISOString(),checkedToday:true,isEmpty:true};
   localStorage.setItem('monitorCheckData',JSON.stringify(state.checkData));
-  if(gdriveToken&&navigator.onLine)uploadToGoogleDrive();
+  if(gdriveToken&&navigator.onLine){
+    uploadToGoogleDrive(null,(err)=>{
+      if(err&&err!=='offline'){
+        alert('⚠️ Google Driveへの保存に失敗しました。\n\nWi-Fiと接続状態を確認してください。\n（ローカルには保存済みです）');
+      }
+    });
+  }
+  checkAndSaveExcel();
   if(isAllChecked()){appendToMonthlyExcel(getTodayString(),state.checkData).then(()=>{state.showSummary=true;render();});return;}
   moveNext();
 }
@@ -462,7 +502,7 @@ function autoSaveCurrent(){
 
 function movePrev(){
   autoSaveCurrent();
-  state.pendingMonitorChange=false;  // ← 修正: 戻る時も確認をリセット
+  state.pendingMonitorChange=false;
   state.inputConfirmed=false;
   const ward=wardsConfig[state.currentWardKey];
   if(state.currentChannelIndex>0){state.currentChannelIndex--;}
@@ -481,9 +521,6 @@ function toggleAlarm(key){
   render();
 }
 
-// ============================================================
-// ★ Enter確定ハンドラ
-// ============================================================
 function handleNameKeydown(e){
   if(e.key==='Enter'){
     e.preventDefault();
@@ -533,8 +570,6 @@ function render(){
   const lastChannelIdx=lastWard.monitors[lastMonitorIdx].channels.length-1;
   const isLast=state.currentWardKey===lastWardKey&&state.currentMonitorIndex===lastMonitorIdx&&state.currentChannelIndex===lastChannelIdx;
 
-  // ★ 保存ボタン有効判定
-  // アラーム系はEnter不要で即有効。テキスト入力はEnter確定が必要。
   const hasAlarmInput=state.currentInput.spo2Alarm||state.currentInput.electrodeCheck||
     state.currentInput.batteryChange||state.currentInput.signalLost||
     state.currentInput.tempAbsent||state.currentInput.admitDischargeError||
@@ -542,7 +577,6 @@ function render(){
   const hasTextInput=state.roomNumberSuffix||state.currentInput.patientName;
   const hasInput=hasAlarmInput||(hasTextInput&&state.inputConfirmed);
 
-  // Enter確定ヒント表示
   const needsConfirm=hasTextInput&&!state.inputConfirmed&&!hasAlarmInput;
   const hintHtml=needsConfirm
     ? `<div class="enter-hint">⌨️ <span class="enter-hint-key">Enter</span> を押して確定してください</div>`
@@ -550,12 +584,21 @@ function render(){
       ? `<div class="enter-hint confirmed">✓ 確定済み</div>`
       : '';
 
+  // ★ 次のExcel保存まであと何件か表示
+  const totalChecked=Object.values(state.checkData).filter(d=>d.checkedToday===true).length;
+  const remaining=Math.max(0,(lastExcelSaveCount+EXCEL_SAVE_INTERVAL)-totalChecked);
+  const excelStatusHtml=gdriveToken
+    ? `<div style="font-size:11px;color:#6b7280;margin-top:2px;">📊 次のExcel自動保存まで残り <strong>${remaining}</strong> 件</div>
+       <div class="excel-save-indicator" id="excel-save-indicator">✅ Excelに保存しました</div>`
+    : '';
+
   document.getElementById('app').innerHTML=`
     <div class="card">
       <div class="header">
         <div>
-          <h1 class="title">病棟モニタラウンド <span style="font-size:11px;font-weight:500;color:#9ca3af;letter-spacing:0.02em;">v1.0</span></h1>
+          <h1 class="title">病棟モニタラウンド <span style="font-size:11px;font-weight:500;color:#9ca3af;letter-spacing:0.02em;">v1.1</span></h1>
           ${lastSyncTime?`<div style="font-size:11px;color:#9ca3af;margin-top:2px;">最終同期: ${lastSyncTime}</div>`:''}
+          ${excelStatusHtml}
         </div>
         <div style="display:flex;align-items:center;gap:12px;">
           <div class="stats">
@@ -732,25 +775,18 @@ function renderSummary(){
   document.body.appendChild(modal);
 }
 
-// ★ 修正: 病棟・モニタ・チャンネル切替時に pendingMonitorChange をリセット
 function selectWard(wk){
-  autoSaveCurrent();
-  state.pendingMonitorChange=false;
-  state.inputConfirmed=false;
+  autoSaveCurrent();state.pendingMonitorChange=false;state.inputConfirmed=false;
   state.currentWardKey=wk;state.currentMonitorIndex=0;state.currentChannelIndex=0;
   loadCurrentChannel();render();
 }
 function selectMonitor(idx){
-  autoSaveCurrent();
-  state.pendingMonitorChange=false;
-  state.inputConfirmed=false;
+  autoSaveCurrent();state.pendingMonitorChange=false;state.inputConfirmed=false;
   state.currentMonitorIndex=idx;state.currentChannelIndex=0;
   loadCurrentChannel();render();
 }
 function jumpToChannel(idx){
-  autoSaveCurrent();
-  state.pendingMonitorChange=false;
-  state.inputConfirmed=false;
+  autoSaveCurrent();state.pendingMonitorChange=false;state.inputConfirmed=false;
   state.currentChannelIndex=idx;
   loadCurrentChannel();render();
 }
@@ -792,7 +828,11 @@ async function appendToMonthlyExcel(dateStr,checkData){
     form.append('file',blob);
     const url=existingId?`https://www.googleapis.com/upload/drive/v3/files/${existingId}?uploadType=multipart`:'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart';
     await fetch(url,{method:existingId?'PATCH':'POST',headers:{'Authorization':'Bearer '+gdriveToken},body:form});
-  }catch(err){console.error('Excel保存エラー:',err);}
+  }catch(err){
+    console.error('Excel保存エラー:',err);
+    if(err&&err.message&&err.message.indexOf('401')>=0){handleTokenExpired();}
+    else{alert('⚠️ Excelファイルの保存に失敗しました。\n\nWi-Fiと接続状態を確認してください。\nデータはローカルに保持されています。');}
+  }
 }
 
 function toggleGoogleDrive(){if(gdriveToken){if(confirm('Google Drive連携を解除しますか？'))disconnectGoogleDrive();}else connectGoogleDrive();}
@@ -891,7 +931,7 @@ async function hwRecognize(){
 }
 function hwSelectCandidate(btn,char){
   state.currentInput.patientName+=char;
-  state.inputConfirmed=true;  // 手書き選択も確定済み扱い
+  state.inputConfirmed=true;
   const nameInput=document.querySelector("input[placeholder='山田 太郎']");
   if(nameInput)nameInput.value=state.currentInput.patientName;
   document.querySelectorAll('.hw-candidate').forEach(b=>b.style.background='');
@@ -903,6 +943,10 @@ function hideHandwritingModal(){const modal=document.getElementById('hw-modal');
 window.addEventListener('load',async()=>{
   const saved=localStorage.getItem('monitorCheckData');
   if(saved){try{state.checkData=JSON.parse(saved);}catch(e){}}
+
+  // ★ 起動時にlastExcelSaveCountを現在のチェック済み件数で初期化（起動直後に不要な保存が走らないよう）
+  lastExcelSaveCount=Object.values(state.checkData).filter(d=>d.checkedToday===true).length;
+
   await checkDateChange();
   loadCurrentChannel();
 
